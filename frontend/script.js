@@ -4,15 +4,17 @@ document.addEventListener('DOMContentLoaded', () => {
     let allSongs = [];
     let allPlaylists = [];
     let currentQueue = []; 
+    let currentQueueUnshuffled = []; // NIEUW: Houdt de originele volgorde bij
     let currentSongIndex = -1;
+    let isShuffled = false; // NIEUW: Shuffle state
     let currentView = { type: 'all-songs', id: null };
     let currentActiveNavItem = null; 
 
-    // --- NIEUW: Web Audio API (voor normalisatie) ---
+    // --- Web Audio API ---
     let audioCtx;
     let compressor;
     let audioSource;
-    let isAudioApiInit = false; // Vlag om te checken of de API is gestart
+    let isAudioApiInit = false; 
 
     // --- DOM Elementen ---
     const audioPlayer = document.getElementById('audio-player');
@@ -25,6 +27,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const iconPlayPause = document.getElementById('icon-play-pause');
     const btnPrev = document.getElementById('btn-prev');
     const btnNext = document.getElementById('btn-next');
+    const btnShuffle = document.getElementById('btn-shuffle'); // NIEUW
     const playerThumbnail = document.getElementById('player-thumbnail');
     const playerTitle = document.getElementById('player-title');
     const playerArtist = document.getElementById('player-artist');
@@ -88,11 +91,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    /** NIEUW: Maakt het actiemenu met "Verwijder" optie */
     const createActionsDropdown = (songId, playlistId = null) => {
         let options = '';
-        
-        // Optie 1: Toevoegen aan playlist
         if (allPlaylists.length > 0) {
             options += allPlaylists.map(p => 
                 `<a href="#" class="block px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 action-add-to-playlist" data-song-id="${songId}" data-playlist-id="${p.id}">Voeg toe aan '${p.name}'</a>`
@@ -100,15 +100,10 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             options += `<span class="block px-4 py-2 text-sm text-gray-500">Maak eerst een playlist</span>`;
         }
-        
         options += `<div class="border-t border-gray-700 my-1"></div>`;
-
-        // Optie 2: Verwijder uit *huidige* playlist
         if (playlistId) {
              options += `<a href="#" class="block px-4 py-2 text-sm text-yellow-400 hover:bg-yellow-500 hover:text-white action-remove-from-playlist" data-song-id="${songId}" data-playlist-id="${playlistId}">Verwijder uit deze playlist</a>`;
         }
-
-        // NIEUW - Optie 3: Verwijder permanent
         options += `<a href="#" class="block px-4 py-2 text-sm text-red-400 hover:bg-red-500 hover:text-white action-delete-song" data-song-id="${songId}">Verwijder (permanent)</a>`;
 
         return `
@@ -134,6 +129,28 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         currentActiveNavItem = navElement;
     };
+
+    /** NIEUW: Sorteert de 'currentQueue' alfabetisch */
+    const sortQueue = (queue) => {
+        return queue.sort((a, b) => {
+            if (!a.artist || !a.title) return 0; 
+            if (a.artist.toLowerCase() < b.artist.toLowerCase()) return -1;
+            if (a.artist.toLowerCase() > b.artist.toLowerCase()) return 1;
+            return a.title.toLowerCase().localeCompare(b.title.toLowerCase());
+        });
+    };
+    
+    /** NIEUW: Fisher-Yates shuffle-algoritme */
+    const shuffleArray = (array) => {
+        let currentIndex = array.length, randomIndex;
+        while (currentIndex != 0) {
+            randomIndex = Math.floor(Math.random() * currentIndex);
+            currentIndex--;
+            [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
+        }
+        return array;
+    };
+    
     
     // --- Data Laad Functies (API) ---
 
@@ -143,12 +160,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!response.ok) throw new Error('Kon nummers niet laden');
             allSongs = await response.json();
             
-            allSongs.sort((a, b) => {
-                if (!a.artist || !a.title) return 0; 
-                if (a.artist.toLowerCase() < b.artist.toLowerCase()) return -1;
-                if (a.artist.toLowerCase() > b.artist.toLowerCase()) return 1;
-                return a.title.toLowerCase().localeCompare(b.title.toLowerCase());
-            });
+            // Sorteer de hoofdlijst (allSongs) één keer
+            sortQueue(allSongs);
 
             if (currentView.type === 'all-songs') {
                 renderSongList(allSongs);
@@ -190,7 +203,8 @@ document.addEventListener('DOMContentLoaded', () => {
             btnDeletePlaylist.classList.remove('hidden');
             
             setActiveNav(navElement);
-            renderSongList(playlist.songs || []);
+            // Sorteer de playlist nummers
+            renderSongList(sortQueue(playlist.songs || []));
             
         } catch (error) {
             console.error('Fout bij laden playlist details:', error);
@@ -203,7 +217,7 @@ document.addEventListener('DOMContentLoaded', () => {
         currentViewTitle.textContent = 'Alle Nummers';
         btnDeletePlaylist.classList.add('hidden');
         setActiveNav(navAllSongs);
-        renderSongList(allSongs);
+        renderSongList(allSongs); // allSongs is al gesorteerd
     };
     
     const pollDownloadStatus = async () => {
@@ -233,7 +247,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             if (pendingSongs.length === 0 && downloadStatusContainer.children.length > 0) {
-                await loadAllSongs();
+                await loadAllSongs(); // Volledige herlaad (sorteert allSongs opnieuw)
                 viewNeedsUpdate = true;
             }
             
@@ -242,7 +256,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } 
             else if (currentView.type === 'playlist' && viewNeedsUpdate) {
                 const playlist = await (await fetch(`/api/playlists/${currentView.id}`)).json();
-                renderSongList(playlist.songs || []);
+                renderSongList(sortQueue(playlist.songs || [])); // Herlaad en sorteer playlist
             }
 
         } catch (error) {
@@ -254,15 +268,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /** Render de lijst met nummers in de tabel */
     const renderSongList = (songs) => {
-        currentQueue = songs; 
-        songListTbody.innerHTML = ''; 
+        // AANGEPAST: Update de wachtrijen, maar sorteer NIET (dat doen we nu handmatig)
+        currentQueueUnshuffled = [...songs];
         
-        if (songs.length === 0) {
+        if (isShuffled) {
+            // Als shuffle aanstaat, shuffel de *nieuwe* lijst
+            currentQueue = shuffleArray([...songs]);
+        } else {
+            // Anders, gebruik de gesorteerde lijst
+            currentQueue = [...songs];
+        }
+
+        songListTbody.innerHTML = ''; 
+        if (currentQueue.length === 0) {
             songListTbody.innerHTML = '<tr><td colspan="5" class="px-5 py-6 text-center text-gray-500">Geen nummers in deze weergave.</td></tr>';
             return;
         }
 
-        songs.forEach((song, index) => {
+        // Render de (mogelijk geshuffelde) currentQueue
+        currentQueue.forEach((song, index) => {
             const isPlaying = (currentSongIndex === index && !audioPlayer.paused);
             
             const tr = document.createElement('tr');
@@ -271,7 +295,6 @@ document.addEventListener('DOMContentLoaded', () => {
             let playIcon = 'fa-play';
             if(isPlaying) playIcon = 'fa-pause';
             
-            // NIEUW: Standaard muzieknoot-icoon
             const iconHtml = song.thumbnail_url 
                 ? `<img src="${song.thumbnail_url}" alt="Thumb" class="w-10 h-10 rounded-md bg-gray-800">`
                 : `<div class="w-10 h-10 rounded-md bg-gray-700 flex items-center justify-center flex-shrink-0">
@@ -343,30 +366,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Player Logica ---
     
-    /** Initialiseer de Web Audio API (moet na een user-klik) */
     const initAudioApi = () => {
         if (isAudioApiInit) return;
         
         console.log("Audio API initialiseren...");
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         
-        // Maak de compressor (normalisatie)
         compressor = audioCtx.createDynamicsCompressor();
-        compressor.threshold.setValueAtTime(-40, audioCtx.currentTime); // db
-        compressor.knee.setValueAtTime(30, audioCtx.currentTime);      // db
+        compressor.threshold.setValueAtTime(-40, audioCtx.currentTime); 
+        compressor.knee.setValueAtTime(30, audioCtx.currentTime);      
         compressor.ratio.setValueAtTime(12, audioCtx.currentTime);
-        compressor.attack.setValueAtTime(0, audioCtx.currentTime);     // s
-        compressor.release.setValueAtTime(0.25, audioCtx.currentTime); // s
+        compressor.attack.setValueAtTime(0, audioCtx.currentTime);     
+        compressor.release.setValueAtTime(0.25, audioCtx.currentTime); 
 
-        // Koppel de <audio> tag aan de API
         audioSource = audioCtx.createMediaElementSource(audioPlayer);
-        
-        // Route: Audio Source -> Compressor -> Output (speakers)
         audioSource.connect(compressor).connect(audioCtx.destination);
         isAudioApiInit = true;
     };
     
     const playSong = (index) => {
+        // AANGEPAST: Gebruik 'currentQueue' (die geshuffeld kan zijn)
         if (index < 0 || index >= currentQueue.length) return;
         
         const song = currentQueue[index];
@@ -379,31 +398,19 @@ document.addEventListener('DOMContentLoaded', () => {
         audioPlayer.src = `/api/stream/${song.id}`; 
         audioPlayer.play();
 
-        // NIEUW: Update player thumbnail met standaard icoon
         playerThumbnail.src = song.thumbnail_url || 'https://via.placeholder.com/56/1f2937/10b981?text=?';
-        if (!song.thumbnail_url) {
-            // Als er geen thumbnail is, kunnen we de placeholder niet tonen
-            // (Dit is een beperking, we laten de oude staan of tonen een 'leeg' blok)
-            // Laten we de 'via.placeholder' gebruiken als standaard
-        }
         playerTitle.textContent = song.title;
         playerArtist.textContent = song.artist;
         
         btnPrev.disabled = (currentSongIndex === 0);
         btnNext.disabled = (currentSongIndex === currentQueue.length - 1);
         
-        renderSongList(currentQueue);
+        renderSongList(currentQueueUnshuffled); // Her-render de *ongeshuffelde* lijst
     };
 
     const togglePlayPause = () => {
-        // NIEUW: Start de Audio API bij de eerste keer afspelen
-        if (!isAudioApiInit) {
-            initAudioApi();
-        }
-        // Browsers vereisen soms een 'resume' na user input
-        if (audioCtx && audioCtx.state === 'suspended') {
-            audioCtx.resume();
-        }
+        if (!isAudioApiInit) initAudioApi();
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 
         if (audioPlayer.paused) {
             if (currentSongIndex === -1 && currentQueue.length > 0) {
@@ -422,7 +429,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             audioPlayer.pause();
             currentSongIndex = -1;
-            renderSongList(currentQueue);
+            renderSongList(currentQueueUnshuffled); // Her-render de *ongeshuffelde* lijst
         }
     };
 
@@ -440,15 +447,35 @@ document.addEventListener('DOMContentLoaded', () => {
     btnNext.addEventListener('click', playNext);
     btnPrev.addEventListener('click', playPrev);
 
+    /** NIEUW: Shuffle knop logica */
+    btnShuffle.addEventListener('click', () => {
+        isShuffled = !isShuffled;
+        
+        // Update de UI van de knop
+        if (isShuffled) {
+            btnShuffle.classList.add('text-green-500'); // Actieve kleur
+            // Shuffel de huidige lijst
+            currentQueue = shuffleArray([...currentQueueUnshuffled]);
+        } else {
+            btnShuffle.classList.remove('text-green-500');
+            // Zet terug naar gesorteerde lijst
+            currentQueue = [...currentQueueUnshuffled];
+        }
+        
+        // Her-render de lijst in de nieuwe (geshuffelde of gesorteerde) volgorde
+        renderSongList(currentQueueUnshuffled);
+    });
+    // ---
+
     audioPlayer.addEventListener('play', () => {
         iconPlayPause.classList.remove('fa-play');
         iconPlayPause.classList.add('fa-pause');
-        renderSongList(currentQueue);
+        renderSongList(currentQueueUnshuffled); // Her-render de *ongeshuffelde* lijst
     });
     audioPlayer.addEventListener('pause', () => {
         iconPlayPause.classList.remove('fa-pause');
         iconPlayPause.classList.add('fa-play');
-        renderSongList(currentQueue);
+        renderSongList(currentQueueUnshuffled); // Her-render de *ongeshuffelde* lijst
     });
     audioPlayer.addEventListener('ended', playNext);
     audioPlayer.addEventListener('timeupdate', () => {
@@ -466,17 +493,11 @@ document.addEventListener('DOMContentLoaded', () => {
         audioPlayer.currentTime = playerSeeker.value;
     });
     
-    /** NIEUW: Helper om volume slider + icoon bij te werken */
     const updateVolumeSliderVisual = (value) => {
         const volume = value / 100;
-        
-        if (volume === 0) {
-            volumeIcon.className = 'fas fa-volume-mute text-gray-400';
-        } else if (volume < 0.5) {
-            volumeIcon.className = 'fas fa-volume-low text-gray-400';
-        } else {
-            volumeIcon.className = 'fas fa-volume-high text-gray-400';
-        }
+        if (volume === 0) volumeIcon.className = 'fas fa-volume-mute text-gray-400';
+        else if (volume < 0.5) volumeIcon.className = 'fas fa-volume-low text-gray-400';
+        else volumeIcon.className = 'fas fa-volume-high text-gray-400';
         playerVolume.style.background = `linear-gradient(to right, #ffffff ${value}%, #374151 ${value}%)`;
     };
 
@@ -484,8 +505,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const volumeValue = playerVolume.value;
         audioPlayer.volume = volumeValue / 100;
         updateVolumeSliderVisual(volumeValue);
-        
-        // NIEUW: Sla volume op
         localStorage.setItem('musicHubVolume', volumeValue);
     });
 
@@ -525,7 +544,6 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         
-        // NIEUW: Handler voor verwijderen
         const deleteBtn = e.target.closest('.action-delete-song');
         if (deleteBtn) {
             e.preventDefault();
@@ -550,19 +568,16 @@ document.addEventListener('DOMContentLoaded', () => {
     btnDeletePlaylist.addEventListener('click', async (e) => {
         const playlistId = currentView.id;
         if (!playlistId) return;
-        
-        const playlist = allPlaylists.find(p => p.id === playlistId);
+        const playlist = allPlaylists.find(p => p.id == playlistId);
         if(!confirm(`Weet je zeker dat je de playlist "${playlist.name}" wilt verwijderen?`)) {
             return;
         }
-        
         try {
             const response = await fetch(`/api/playlists/${playlistId}`, { method: 'DELETE' });
             if (!response.ok) throw new Error("Kon playlist niet verwijderen");
             await loadAllPlaylists();
             showAllSongsView();
         } catch (error) {
-            console.error('Fout bij verwijderen playlist:', error);
             alert(error.message);
         }
     });
@@ -575,8 +590,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!url) return;
         inputAddUrl.disabled = true;
         try {
-            const body = new URLSearchParams();
-            body.append('url', url);
+            const body = new URLSearchParams(); body.append('url', url);
             const response = await fetch('/api/add', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -586,7 +600,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const newSong = await response.json();
             if (!allSongs.find(s => s.id === newSong.id)) allSongs.push(newSong);
             else { const index = allSongs.findIndex(s => s.id === newSong.id); allSongs[index] = newSong; }
+            
+            // AANGEPAST: Sorteer allSongs opnieuw na toevoegen
+            sortQueue(allSongs);
             if (currentView.type === 'all-songs') renderSongList(allSongs);
+            
             pollDownloadStatus();
             inputAddUrl.value = '';
         } catch (error) {
@@ -609,7 +627,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!response.ok) { const error = await response.json(); throw new Error(error.detail || 'Fout bij uploaden'); }
             const newSong = await response.json();
             allSongs.push(newSong);
+            
+            // AANGEPAST: Sorteer allSongs opnieuw na toevoegen
+            sortQueue(allSongs);
             if (currentView.type === 'all-songs') renderSongList(allSongs);
+            
             inputUploadFile.value = '';
         } catch (error) {
             alert(`Fout: ${error.message}`);
@@ -658,33 +680,35 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`/api/playlists/${playlistId}/remove/${songId}`, { method: 'DELETE' });
             if (!response.ok) throw new Error('Kon nummer niet verwijderen uit playlist');
             const updatedPlaylist = await response.json();
-            renderSongList(updatedPlaylist.songs); 
+            
+            // AANGEPAST: Sorteer de teruggekomen playlist
+            renderSongList(sortQueue(updatedPlaylist.songs || [])); 
+            
             await loadAllPlaylists(); 
         } catch (error) {
             alert(error.message);
         }
     };
     
-    /** NIEUW: Handler voor permanent verwijderen */
     const handleDeleteSong = async (songId) => {
         const song = allSongs.find(s => s.id == songId);
         if (!song) return;
-        
-        if (!confirm(`Weet je zeker dat je "${song.title}" permanent wilt verwijderen? Dit kan niet ongedaan gemaakt worden.`)) {
-            return;
-        }
+        if (!confirm(`Weet je zeker dat je "${song.title}" permanent wilt verwijderen?`)) return;
 
         try {
             const response = await fetch(`/api/songs/${songId}`, { method: 'DELETE' });
             if (!response.ok) throw new Error('Kon nummer niet verwijderen');
             
-            // Verwijder uit alle lokale lijsten
             allSongs = allSongs.filter(s => s.id != songId);
-            currentQueue = currentQueue.filter(s => s.id != songId);
             
-            // Herlaad de huidige view
-            renderSongList(currentQueue);
-            // Herlaad playlists (voor song count)
+            // AANGEPAST: Herlaad de huidige view (die nu 'allSongs' of een playlist kan zijn)
+            if (currentView.type === 'all-songs') {
+                renderSongList(allSongs);
+            } else if (currentView.type === 'playlist') {
+                const playlist = await (await fetch(`/api/playlists/${currentView.id}`)).json();
+                renderSongList(sortQueue(playlist.songs || []));
+            }
+            
             await loadAllPlaylists();
 
         } catch (error) {
@@ -692,10 +716,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-
     // --- Initialisatie ---
     const init = async () => {
-        // NIEUW: Laad opgeslagen volume
         const savedVolume = localStorage.getItem('musicHubVolume') || 80;
         playerVolume.value = savedVolume;
         audioPlayer.volume = savedVolume / 100;
